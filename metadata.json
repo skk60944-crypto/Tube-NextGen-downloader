@@ -1,0 +1,6 @@
+{
+  "name": "TubeAIO NextGen",
+  "description": "An open source, ad-free video and audio downloader with yt-dlp stream extraction, background downloads, in-app media player with subtitles, and a private vault.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

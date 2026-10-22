@@ -1,0 +1,139 @@
+name: Build and Release APK
+
+on:
+  push:
+    branches:
+      - main
+      - master
+    tags:
+      - 'v*'
+  pull_request:
+    branches:
+      - main
+      - master
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build & Release APK
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Java JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '21'
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Prepare Environment & Secrets Placeholder
+        run: |
+          # Copy .env.example to .env so Secrets Gradle plugin succeeds
+          if [ -f ".env.example" ] && [ ! -f ".env" ]; then
+            cp .env.example .env
+          elif [ ! -f ".env" ]; then
+            touch .env
+          fi
+
+          # Generate signing keystore for release build
+          keytool -genkeypair -v \
+            -keystore my-upload-key.jks \
+            -alias upload \
+            -keyalg RSA \
+            -keysize 2048 \
+            -validity 10000 \
+            -storepass android \
+            -keypass android \
+            -dname "CN=TubeAIO NextGen, OU=App, O=TubeAIO, L=Unknown, ST=Unknown, C=US"
+
+          # Also create fallback debug.keystore if needed
+          keytool -genkeypair -v \
+            -keystore debug.keystore \
+            -alias androiddebugkey \
+            -keyalg RSA \
+            -keysize 2048 \
+            -validity 10000 \
+            -storepass android \
+            -keypass android \
+            -dname "CN=Android Debug, O=Android, C=US"
+
+          chmod +x gradlew
+
+      - name: Build Debug & Release APK
+        env:
+          STORE_PASSWORD: android
+          KEY_PASSWORD: android
+          KEYSTORE_PATH: ${{ github.workspace }}/my-upload-key.jks
+        run: |
+          ./gradlew assembleDebug assembleRelease --stacktrace
+
+      - name: Locate and Rename APKs
+        run: |
+          mkdir -p build-apks
+          
+          # Copy Debug APK
+          if [ -f "app/build/outputs/apk/debug/app-debug.apk" ]; then
+            cp app/build/outputs/apk/debug/app-debug.apk build-apks/TubeAIO-NextGen-debug.apk
+          fi
+
+          # Copy Release APK
+          if [ -f "app/build/outputs/apk/release/app-release.apk" ]; then
+            cp app/build/outputs/apk/release/app-release.apk build-apks/TubeAIO-NextGen-release.apk
+          fi
+
+          ls -la build-apks/
+
+      - name: Upload APKs as Workflow Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: TubeAIO-NextGen-APKs
+          path: build-apks/*.apk
+          retention-days: 30
+
+      - name: Determine Release Tag
+        id: release_info
+        if: github.event_name == 'push' && (startsWith(github.ref, 'refs/tags/') || github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
+        run: |
+          if [[ "${{ github.ref }}" == refs/tags/* ]]; then
+            TAG_NAME="${GITHUB_REF#refs/tags/}"
+          else
+            TAG_NAME="v1.0.$(date +'%Y%m%d%H%M')"
+          fi
+          echo "tag_name=$TAG_NAME" >> $GITHUB_OUTPUT
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        if: github.event_name == 'push' && (startsWith(github.ref, 'refs/tags/') || github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
+        with:
+          tag_name: ${{ steps.release_info.outputs.tag_name }}
+          name: "TubeAIO NextGen ${{ steps.release_info.outputs.tag_name }}"
+          body: |
+            ### TubeAIO NextGen Automated Release 🚀
+
+            **What's New:**
+            - Latest update from commit: `${{ github.sha }}`
+            - Automatic APK build (Debug & Release)
+            - 100% Ad-Free, Open Source video & audio downloader
+            - In-app media player with subtitles and background playback
+            - Private Gallery-Hidden Vault
+
+            **Downloads:**
+            - `TubeAIO-NextGen-release.apk`: Production signed APK (Recommended)
+            - `TubeAIO-NextGen-debug.apk`: Debug APK
+          files: |
+            build-apks/TubeAIO-NextGen-release.apk
+            build-apks/TubeAIO-NextGen-debug.apk
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
