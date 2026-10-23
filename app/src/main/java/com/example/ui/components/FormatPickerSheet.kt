@@ -64,7 +64,8 @@ import com.example.ui.theme.ElectricCyan
 fun FormatPickerSheet(
     extraction: MediaExtractionResult,
     onDismiss: () -> Unit,
-    onStartDownload: (format: MediaFormat, saveToVault: Boolean) -> Unit
+    onStartDownload: (format: MediaFormat, saveToVault: Boolean) -> Unit,
+    onOpenInBrowser: ((url: String) -> Unit)? = null
 ) {
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     var selectedTab by remember { mutableIntStateOf(0) } // 0: Video, 1: Audio
@@ -128,7 +129,49 @@ fun FormatPickerSheet(
                 }
             }
 
-            Spacer(modifier = Modifier.height(16.dp))
+            if (extraction.platform == "Facebook" || extraction.sourceUrl.contains("facebook.com") || extraction.sourceUrl.contains("fb.watch")) {
+                Spacer(modifier = Modifier.height(10.dp))
+                Card(
+                    shape = RoundedCornerShape(12.dp),
+                    colors = CardDefaults.cardColors(containerColor = ElectricCyan.copy(alpha = 0.12f)),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Row(
+                        modifier = Modifier.padding(12.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "Facebook 2-3 MB Stream",
+                                style = MaterialTheme.typography.labelLarge,
+                                fontWeight = FontWeight.Bold,
+                                color = ElectricCyan
+                            )
+                            Text(
+                                text = "Download below (2-3 MB) or tap 'Browser' to detect the original clip inside TubeAIO.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                        if (onOpenInBrowser != null) {
+                            Spacer(modifier = Modifier.width(8.dp))
+                            androidx.compose.material3.Button(
+                                onClick = {
+                                    onDismiss()
+                                    onOpenInBrowser(extraction.sourceUrl)
+                                },
+                                colors = ButtonDefaults.buttonColors(containerColor = ElectricCyan),
+                                contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                                modifier = Modifier.height(34.dp)
+                            ) {
+                                Text("Browser", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                            }
+                        }
+                    }
+                }
+            }
+
+            Spacer(modifier = Modifier.height(14.dp))
 
             // Tab Selection: Video vs Audio
             TabRow(

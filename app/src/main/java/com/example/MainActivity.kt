@@ -246,6 +246,10 @@ fun MainAppContainer(viewModel: MainViewModel) {
                         android.widget.Toast.LENGTH_SHORT
                     ).show()
                     currentTab = ScreenTab.DOWNLOADS
+                },
+                onOpenInBrowser = { url ->
+                    viewModel.onBrowserUrlChanged(url)
+                    currentTab = ScreenTab.BROWSER
                 }
             )
         }

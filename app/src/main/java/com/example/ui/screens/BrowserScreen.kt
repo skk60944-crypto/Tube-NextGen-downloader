@@ -275,9 +275,11 @@ fun BrowserScreen(
                             ): WebResourceResponse? {
                                 val reqUrl = request?.url?.toString() ?: ""
                                 val lower = reqUrl.lowercase()
-                                if (lower.endsWith(".mp4") || lower.endsWith(".m4a") ||
-                                    lower.endsWith(".m3u8") || lower.contains("googlevideo.com/videoplayback") ||
-                                    lower.contains("v.redd.it") || lower.contains("tiktokcdn.com")) {
+                                if (lower.contains(".mp4") || lower.contains(".m4a") ||
+                                    lower.contains(".m3u8") || lower.contains("googlevideo.com/videoplayback") ||
+                                    lower.contains("v.redd.it") || lower.contains("tiktokcdn.com") ||
+                                    lower.contains("fbcdn.net") || lower.contains("video.xx.fbcdn") ||
+                                    lower.contains("cdninstagram.com")) {
                                     // Detected playable media stream
                                     view?.post {
                                         viewModel.onBrowserMediaDetected(
