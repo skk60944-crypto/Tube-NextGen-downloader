@@ -79,6 +79,7 @@ fun BrowserScreen(
     viewModel: MainViewModel,
     initialUrl: String? = null
 ) {
+    val context = androidx.compose.ui.platform.LocalContext.current
     val browserUrl by viewModel.browserUrl.collectAsState()
     val showSnifferSheet by viewModel.showBrowserSnifferSheet.collectAsState()
     val detectedStreams by viewModel.detectedBrowserStreams.collectAsState()
@@ -334,6 +335,11 @@ fun BrowserScreen(
                                     subtitlesUrl = null,
                                     saveToVault = false
                                 )
+                                android.widget.Toast.makeText(
+                                    context,
+                                    "Download started! Check progress in Downloads tab.",
+                                    android.widget.Toast.LENGTH_SHORT
+                                ).show()
                             }
                         }
                         .testTag("media_sniffer_fab")

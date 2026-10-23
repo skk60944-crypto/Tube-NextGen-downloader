@@ -133,6 +133,8 @@ fun MainAppContainer(viewModel: MainViewModel) {
         }
     }
 
+    val context = androidx.compose.ui.platform.LocalContext.current
+
     Scaffold(
         modifier = Modifier.fillMaxSize(),
         bottomBar = {
@@ -205,7 +207,8 @@ fun MainAppContainer(viewModel: MainViewModel) {
                     onNavigateToBrowser = { url ->
                         viewModel.onBrowserUrlChanged(url)
                         currentTab = ScreenTab.BROWSER
-                    }
+                    },
+                    onNavigateToDownloads = { currentTab = ScreenTab.DOWNLOADS }
                 )
                 ScreenTab.BROWSER -> BrowserScreen(
                     viewModel = viewModel
@@ -237,6 +240,12 @@ fun MainAppContainer(viewModel: MainViewModel) {
                         subtitlesUrl = extractionResult!!.subtitles.firstOrNull()?.url,
                         saveToVault = saveToVault
                     )
+                    android.widget.Toast.makeText(
+                        context,
+                        "Download started! Track progress in Downloads tab.",
+                        android.widget.Toast.LENGTH_SHORT
+                    ).show()
+                    currentTab = ScreenTab.DOWNLOADS
                 }
             )
         }

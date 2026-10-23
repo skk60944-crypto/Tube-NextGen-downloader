@@ -1,6 +1,7 @@
 package com.example.service
 
 import android.content.Context
+import android.util.Log
 import com.example.data.AppDatabase
 import com.example.model.MediaEntity
 import kotlinx.coroutines.CancellationException
@@ -8,7 +9,6 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -17,8 +17,6 @@ import kotlinx.coroutines.launch
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import java.io.File
-import java.io.FileOutputStream
-import java.io.InputStream
 import java.io.RandomAccessFile
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
@@ -30,9 +28,10 @@ class DownloadEngine private constructor(private val context: Context) {
     private val mediaDao = database.mediaDao()
 
     private val client = OkHttpClient.Builder()
-        .connectTimeout(20, TimeUnit.SECONDS)
-        .readTimeout(30, TimeUnit.SECONDS)
+        .connectTimeout(30, TimeUnit.SECONDS)
+        .readTimeout(60, TimeUnit.SECONDS)
         .followRedirects(true)
+        .followSslRedirects(true)
         .build()
 
     // Active downloading coroutine jobs keyed by MediaEntity.id
@@ -64,7 +63,9 @@ class DownloadEngine private constructor(private val context: Context) {
         scope.launch {
             mediaDao.updateStatus(id, "PAUSED")
             removeStats(id)
-            DownloadService.checkServiceState(context)
+            try {
+                DownloadService.checkServiceState(context)
+            } catch (_: Exception) {}
         }
     }
 
@@ -91,7 +92,9 @@ class DownloadEngine private constructor(private val context: Context) {
                 mediaDao.delete(entity)
             }
             removeStats(id)
-            DownloadService.checkServiceState(context)
+            try {
+                DownloadService.checkServiceState(context)
+            } catch (_: Exception) {}
         }
     }
 
@@ -100,7 +103,13 @@ class DownloadEngine private constructor(private val context: Context) {
 
         val job = scope.launch {
             try {
-                DownloadService.start(context)
+                // Safely start ForegroundService without crashing if system denies it
+                try {
+                    DownloadService.start(context)
+                } catch (e: Exception) {
+                    Log.w("DownloadEngine", "Could not start ForegroundService: ${e.message}")
+                }
+
                 val entity = mediaDao.getById(id) ?: return@launch
                 mediaDao.updateStatus(id, "DOWNLOADING")
 
@@ -112,27 +121,44 @@ class DownloadEngine private constructor(private val context: Context) {
 
                 val requestBuilder = Request.Builder()
                     .url(entity.downloadUrl)
-                    .header("User-Agent", "TubeAIO-NextGen/2.0")
+                    .header("User-Agent", "Mozilla/5.0 (Linux; Android 14; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36")
+                    .header("Accept", "*/*")
+                    .header("Connection", "keep-alive")
 
                 if (existingBytes > 0) {
                     requestBuilder.header("Range", "bytes=$existingBytes-")
                 }
 
-                client.newCall(requestBuilder.build()).execute().use { response ->
-                    val isRange = response.code == 206
-                    val isOk = response.code == 200
+                var response = client.newCall(requestBuilder.build()).execute()
 
-                    if (!isRange && !isOk) {
-                        mediaDao.updateStatus(id, "FAILED", "HTTP error: ${response.code}")
+                // If Range not satisfiable (416), delete partial file and retry fresh
+                if (response.code == 416 && existingBytes > 0) {
+                    response.close()
+                    partFile.delete()
+                    existingBytes = 0L
+                    val freshRequest = Request.Builder()
+                        .url(entity.downloadUrl)
+                        .header("User-Agent", "Mozilla/5.0 (Linux; Android 14; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36")
+                        .header("Accept", "*/*")
+                        .build()
+                    response = client.newCall(freshRequest).execute()
+                }
+
+                response.use { resp ->
+                    val isRange = resp.code == 206
+                    val isSuccessful = resp.isSuccessful
+
+                    if (!isSuccessful && !isRange) {
+                        mediaDao.updateStatus(id, "FAILED", "Server returned HTTP ${resp.code}")
                         return@use
                     }
 
                     if (!isRange) {
-                        // Server doesn't support resume, restart
+                        // Server does not support Range header; restart fresh
                         existingBytes = 0L
                     }
 
-                    val body = response.body ?: throw IllegalStateException("Empty response body")
+                    val body = resp.body ?: throw IllegalStateException("Empty response body from media server")
                     val contentLength = body.contentLength()
                     val totalBytes = if (contentLength > 0) existingBytes + contentLength else entity.totalBytes
 
@@ -143,7 +169,7 @@ class DownloadEngine private constructor(private val context: Context) {
                     }
 
                     val inputStream = body.byteStream()
-                    val buffer = ByteArray(16 * 1024)
+                    val buffer = ByteArray(32 * 1024)
                     var totalDownloaded = existingBytes
                     var lastUpdate = System.currentTimeMillis()
                     var bytesSinceLastUpdate = 0L
@@ -158,8 +184,8 @@ class DownloadEngine private constructor(private val context: Context) {
 
                             val now = System.currentTimeMillis()
                             val timeDiff = now - lastUpdate
-                            if (timeDiff >= 600) {
-                                currentSpeed = (bytesSinceLastUpdate * 1000) / timeDiff
+                            if (timeDiff >= 400) {
+                                currentSpeed = (bytesSinceLastUpdate * 1000) / timeDiff.coerceAtLeast(1)
                                 val progress = if (totalBytes > 0) {
                                     ((totalDownloaded * 100) / totalBytes).toInt().coerceIn(0, 100)
                                 } else 0
@@ -175,12 +201,12 @@ class DownloadEngine private constructor(private val context: Context) {
                     }
 
                     if (!isActive) {
-                        // Cancelled or paused
                         return@launch
                     }
 
-                    // Download complete: rename .part to final
+                    // Download complete: atomically move .part to final target file
                     if (partFile.exists()) {
+                        if (targetFile.exists()) targetFile.delete()
                         partFile.renameTo(targetFile)
                     }
 
@@ -199,11 +225,14 @@ class DownloadEngine private constructor(private val context: Context) {
             } catch (e: CancellationException) {
                 // Handled in pause or cancel
             } catch (e: Exception) {
-                mediaDao.updateStatus(id, "FAILED", e.localizedMessage ?: "Download failed")
+                Log.e("DownloadEngine", "Download failed for $id", e)
+                mediaDao.updateStatus(id, "FAILED", e.localizedMessage ?: "Network connection error")
                 removeStats(id)
             } finally {
                 activeJobs.remove(id)
-                DownloadService.checkServiceState(context)
+                try {
+                    DownloadService.checkServiceState(context)
+                } catch (_: Exception) {}
             }
         }
 

@@ -70,12 +70,14 @@ data class PlatformChip(
 @Composable
 fun ExploreScreen(
     viewModel: MainViewModel,
-    onNavigateToBrowser: (url: String) -> Unit
+    onNavigateToBrowser: (url: String) -> Unit,
+    onNavigateToDownloads: () -> Unit
 ) {
     val context = LocalContext.current
     val inputUrl by viewModel.inputUrl.collectAsState()
     val isAnalyzing by viewModel.isAnalyzing.collectAsState()
     val analyzeError by viewModel.analyzeError.collectAsState()
+    val activeDownloads by viewModel.activeDownloads.collectAsState()
 
     val platforms = listOf(
         PlatformChip("YouTube", "https://www.youtube.com/watch?v=dQw4w9WgXcQ", CrimsonRed),
@@ -84,7 +86,7 @@ fun ExploreScreen(
         PlatformChip("Vimeo", "https://vimeo.com/76979871", Color(0xFF1AB7EA)),
         PlatformChip("SoundCloud", "https://soundcloud.com/artist/track", Color(0xFFFF5500)),
         PlatformChip("Reddit", "https://www.reddit.com/r/videos/comments/test", Color(0xFFFF4500)),
-        PlatformChip("Direct MP4", "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4", ElectricCyan)
+        PlatformChip("Direct MP4", "https://archive.org/download/BigBuckBunny_124/Content/big_buck_bunny_720p_surround.mp4", ElectricCyan)
     )
 
     LazyColumn(
@@ -149,8 +151,83 @@ fun ExploreScreen(
             }
         }
 
+        // Live Active Downloads Banner (if any)
+        if (activeDownloads.isNotEmpty()) {
+            item {
+                val first = activeDownloads.first()
+                Card(
+                    shape = RoundedCornerShape(16.dp),
+                    colors = CardDefaults.cardColors(containerColor = CrimsonRed.copy(alpha = 0.12f)),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable { onNavigateToDownloads() }
+                ) {
+                    Column(modifier = Modifier.padding(14.dp)) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Icon(Icons.Default.Download, contentDescription = null, tint = CrimsonRed, modifier = Modifier.size(20.dp))
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Text(
+                                    text = "Downloading (${activeDownloads.size})",
+                                    style = MaterialTheme.typography.titleSmall,
+                                    fontWeight = FontWeight.Bold,
+                                    color = CrimsonRed
+                                )
+                            }
+                            Text(
+                                text = "View All →",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = CrimsonRed,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
+                        Spacer(modifier = Modifier.height(6.dp))
+                        Text(
+                            text = first.title,
+                            style = MaterialTheme.typography.bodySmall,
+                            maxLines = 1,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                        Spacer(modifier = Modifier.height(6.dp))
+                        androidx.compose.material3.LinearProgressIndicator(
+                            progress = { (first.progress / 100f).coerceIn(0f, 1f) },
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(6.dp)
+                                .clip(RoundedCornerShape(3.dp)),
+                            color = CrimsonRed
+                        )
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Text(
+                                text = "${first.progress}% • ${first.status}",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                            if (first.speedBytesPerSec > 0) {
+                                Text(
+                                    text = "${first.speedBytesPerSec / 1_000_000} MB/s",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = ElectricCyan,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         // Paste & Analyze Card
         item {
+
             Card(
                 shape = RoundedCornerShape(16.dp),
                 colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f)),
