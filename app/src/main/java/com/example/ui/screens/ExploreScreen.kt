@@ -319,6 +319,19 @@ fun ExploreScreen(
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.error
                         )
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Button(
+                            onClick = { onNavigateToBrowser(inputUrl) },
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(40.dp),
+                            colors = ButtonDefaults.buttonColors(containerColor = ElectricCyan),
+                            shape = RoundedCornerShape(10.dp)
+                        ) {
+                            Icon(Icons.Default.Public, contentDescription = null, modifier = Modifier.size(16.dp))
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text("Open in Built-in Browser to Capture", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                        }
                     }
                 }
             }

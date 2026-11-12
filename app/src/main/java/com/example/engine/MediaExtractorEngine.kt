@@ -1,18 +1,24 @@
 package com.example.engine
 
 import android.net.Uri
+import android.text.Html
+import android.util.Log
 import com.example.model.MediaExtractionResult
 import com.example.model.MediaFormat
 import com.example.model.SubtitleTrack
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONObject
 import java.util.concurrent.TimeUnit
 import java.util.regex.Pattern
 
 object MediaExtractorEngine {
+
+    private const val TAG = "MediaExtractorEngine"
 
     private val client = OkHttpClient.Builder()
         .connectTimeout(15, TimeUnit.SECONDS)
@@ -21,21 +27,18 @@ object MediaExtractorEngine {
         .followSslRedirects(true)
         .build()
 
-    private const val USER_AGENT =
-        "Mozilla/5.0 (Linux; Android 14; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36"
-
-    // High reliability, fast lightweight sample stream (realistic ~2.5 MB to 5 MB sizes)
-    private const val FAST_MP4_STREAM = "https://raw.githubusercontent.com/mediaelement/mediaelement-files/master/big_buck_bunny.mp4"
-    private const val FAST_MP3_STREAM = "https://archive.org/download/testmp3testfile/mpthreetest.mp3"
+    private const val USER_AGENT_MOBILE =
+        "Mozilla/5.0 (Linux; Android 14; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36"
 
     /**
-     * Extracts media metadata, formats, and subtitles from a URL.
+     * Extracts authentic media metadata and download stream URLs.
+     * Never returns fake or sample streams.
      */
     suspend fun extractMedia(rawUrl: String): Result<MediaExtractionResult> = withContext(Dispatchers.IO) {
         try {
             val trimmedUrl = rawUrl.trim()
             if (trimmedUrl.isBlank()) {
-                return@withContext Result.failure(IllegalArgumentException("URL is empty"))
+                return@withContext Result.failure(IllegalArgumentException("Please enter a valid link."))
             }
 
             // 1. Direct media URL check (e.g. .mp4, .mp3, .m4a, .webm)
@@ -43,7 +46,7 @@ object MediaExtractorEngine {
                 return@withContext Result.success(extractDirectMedia(trimmedUrl))
             }
 
-            // 2. Facebook URLs (reels, watch, share links)
+            // 2. Facebook URLs (reels, watch, share links, posts)
             if (isFacebookUrl(trimmedUrl)) {
                 val fbResult = extractFacebook(trimmedUrl)
                 if (fbResult != null) {
@@ -65,10 +68,14 @@ object MediaExtractorEngine {
                 return@withContext Result.success(htmlResult)
             }
 
-            // 5. Fallback multi-format extractor for web video links
-            val fallback = createSmartFallback(trimmedUrl)
-            Result.success(fallback)
+            // If direct scraping cannot bypass anti-bot or DRM, guide user to built-in browser
+            Result.failure(
+                IllegalStateException(
+                    "Unable to extract video stream directly. Please open this link in the Built-in Browser to capture and download the media stream."
+                )
+            )
         } catch (e: Exception) {
+            Log.e(TAG, "Extraction failed for $rawUrl", e)
             Result.failure(e)
         }
     }
@@ -96,7 +103,8 @@ object MediaExtractorEngine {
         val patterns = listOf(
             Pattern.compile("v=([a-zA-Z0-9_-]{11})"),
             Pattern.compile("youtu\\.be/([a-zA-Z0-9_-]{11})"),
-            Pattern.compile("shorts/([a-zA-Z0-9_-]{11})")
+            Pattern.compile("shorts/([a-zA-Z0-9_-]{11})"),
+            Pattern.compile("embed/([a-zA-Z0-9_-]{11})")
         )
         for (p in patterns) {
             val matcher = p.matcher(url)
@@ -114,18 +122,23 @@ object MediaExtractorEngine {
                 url.lowercase().contains(".wav") || url.lowercase().contains(".ogg")
         val ext = if (isAudio) "mp3" else "mp4"
 
+        // Query file size if possible
+        var sizeBytes = 0L
+        try {
+            val headReq = Request.Builder().url(url).head().build()
+            client.newCall(headReq).execute().use { resp ->
+                sizeBytes = resp.header("Content-Length")?.toLongOrNull() ?: 0L
+            }
+        } catch (_: Exception) {}
+
         val formats = if (isAudio) {
             listOf(
-                MediaFormat("audio_original", "High Quality Audio (Direct)", "AUDIO", url, ext, 0L, isAudioOnly = true),
-                MediaFormat("audio_320k", "320 kbps MP3", "AUDIO", url, "mp3", 0L, bitrate = "320 kbps", isAudioOnly = true),
-                MediaFormat("audio_128k", "128 kbps MP3", "AUDIO", url, "mp3", 0L, bitrate = "128 kbps", isAudioOnly = true)
+                MediaFormat("audio_direct", "Audio Stream ($ext)", "AUDIO", url, ext, sizeBytes, isAudioOnly = true)
             )
         } else {
             listOf(
-                MediaFormat("video_original", "Original Quality (Direct Stream)", "VIDEO", url, ext, 0L),
-                MediaFormat("video_1080p", "1080p FHD", "VIDEO", url, "mp4", 0L, resolution = "1920x1080"),
-                MediaFormat("video_720p", "720p HD", "VIDEO", url, "mp4", 0L, resolution = "1280x720"),
-                MediaFormat("audio_extract_320", "Extract Audio (320 kbps MP3)", "AUDIO", url, "mp3", 0L, isAudioOnly = true)
+                MediaFormat("video_direct", "Video Stream ($ext)", "VIDEO", url, ext, sizeBytes),
+                MediaFormat("audio_from_video", "Audio Only ($ext)", "AUDIO", url, ext, sizeBytes, isAudioOnly = true)
             )
         }
 
@@ -140,103 +153,136 @@ object MediaExtractorEngine {
         )
     }
 
-    private suspend fun extractFacebook(url: String): MediaExtractionResult? {
-        val uri = Uri.parse(url)
-        val segments = uri.pathSegments ?: emptyList()
-        val videoId = segments.lastOrNull { it.isNotBlank() && it != "v" && it != "reel" && it != "share" } ?: "video"
-
-        // Attempt direct extraction of hd_src or sd_src from Facebook mobile
+    /**
+     * Extracts real Facebook video streams from fbcdn.net without dummy fallbacks.
+     */
+    private fun extractFacebook(url: String): MediaExtractionResult? {
         try {
-            val mobileUrl = url.replace("www.facebook.com", "m.facebook.com")
             val request = Request.Builder()
-                .url(mobileUrl)
-                .header("User-Agent", USER_AGENT)
-                .header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+                .url(url)
+                .header("User-Agent", USER_AGENT_MOBILE)
+                .header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8")
                 .header("Accept-Language", "en-US,en;q=0.9")
+                .header("Sec-Fetch-Mode", "navigate")
+                .header("Sec-Fetch-Site", "none")
+                .header("Sec-Fetch-Dest", "document")
                 .build()
 
             client.newCall(request).execute().use { response ->
-                if (response.isSuccessful) {
-                    val html = response.body?.string() ?: ""
-                    val hdPattern = Pattern.compile("\"(?:browser_native_hd_url|playable_url_quality_hd)\":\"(https:[^\"]+)\"")
-                    val sdPattern = Pattern.compile("\"(?:browser_native_sd_url|playable_url)\":\"(https:[^\"]+)\"")
-                    val ogVideoPattern = Pattern.compile("<meta\\s+(?:property|name)=[\"']og:video[\"']\\s+content=[\"'](https:[^\"']+)[\"']")
+                if (!response.isSuccessful) return null
+                val html = response.body?.string() ?: return null
 
-                    var hdUrl: String? = null
-                    var sdUrl: String? = null
+                // Title
+                val titlePattern = Pattern.compile("<meta\\s+(?:property|name)=[\"']og:title[\"']\\s+content=[\"']([^\"']+)[\"']")
+                val titleMatcher = titlePattern.matcher(html)
+                var title = if (titleMatcher.find()) {
+                    cleanHtmlText(titleMatcher.group(1))
+                } else {
+                    val pageTitlePattern = Pattern.compile("<title>([^<]+)</title>")
+                    val pageTitleMatcher = pageTitlePattern.matcher(html)
+                    if (pageTitleMatcher.find()) cleanHtmlText(pageTitleMatcher.group(1)) else "Facebook Video"
+                }
+                title = title.substringBefore("| Facebook").trim()
 
-                    val hdMatcher = hdPattern.matcher(html)
-                    if (hdMatcher.find()) {
-                        hdUrl = unescapeJsonUrl(hdMatcher.group(1))
-                    }
+                // Thumbnail
+                val thumbPattern = Pattern.compile("<meta\\s+(?:property|name)=[\"']og:image[\"']\\s+content=[\"']([^\"']+)[\"']")
+                val thumbMatcher = thumbPattern.matcher(html)
+                val thumb = if (thumbMatcher.find()) cleanUrl(thumbMatcher.group(1)) else null
 
-                    val sdMatcher = sdPattern.matcher(html)
-                    if (sdMatcher.find()) {
-                        sdUrl = unescapeJsonUrl(sdMatcher.group(1))
-                    }
+                // Video stream URLs
+                val hdPattern = Pattern.compile("\"(?:browser_native_hd_url|playable_url_quality_hd)\":\"(https:[^\"]+)\"")
+                val sdPattern = Pattern.compile("\"(?:browser_native_sd_url|playable_url)\":\"(https:[^\"]+)\"")
+                val ogVideoPattern = Pattern.compile("<meta\\s+(?:property|name)=[\"']og:video(?::url|:secure_url)?[\"']\\s+content=[\"'](https:[^\"']+)[\"']")
 
-                    if (hdUrl == null && sdUrl == null) {
-                        val ogMatcher = ogVideoPattern.matcher(html)
-                        if (ogMatcher.find()) {
-                            sdUrl = ogMatcher.group(1)
-                        }
-                    }
+                val streamUrls = mutableListOf<Pair<String, String>>() // Label to URL
 
-                    if (hdUrl != null || sdUrl != null) {
-                        val targetStream = hdUrl ?: sdUrl!!
-                        return MediaExtractionResult(
-                            title = "Facebook Video ($videoId)",
-                            author = "Facebook",
-                            sourceUrl = url,
-                            thumbnailUrl = null,
-                            durationSeconds = 60L,
-                            platform = "Facebook",
-                            formats = listOf(
-                                MediaFormat("fb_hd", "HD Video (Original Quality)", "VIDEO", targetStream, "mp4", 3_100_000L, "720p"),
-                                MediaFormat("fb_sd", "SD Video (Mobile Quality)", "VIDEO", sdUrl ?: targetStream, "mp4", 1_900_000L, "360p"),
-                                MediaFormat("fb_audio", "Extract Audio (MP3)", "AUDIO", targetStream, "mp3", 850_000L, isAudioOnly = true)
-                            )
-                        )
+                val hdMatcher = hdPattern.matcher(html)
+                if (hdMatcher.find()) {
+                    streamUrls.add("HD 720p Video" to cleanUrl(hdMatcher.group(1)))
+                }
+
+                val sdMatcher = sdPattern.matcher(html)
+                if (sdMatcher.find()) {
+                    val sdUrl = cleanUrl(sdMatcher.group(1))
+                    if (streamUrls.none { it.second == sdUrl }) {
+                        streamUrls.add("SD Mobile Video" to sdUrl)
                     }
                 }
+
+                val ogMatcher = ogVideoPattern.matcher(html)
+                while (ogMatcher.find()) {
+                    val ogUrl = cleanUrl(ogMatcher.group(1))
+                    if (streamUrls.none { it.second == ogUrl }) {
+                        streamUrls.add("Standard MP4 Video" to ogUrl)
+                    }
+                }
+
+                if (streamUrls.isEmpty()) return null
+
+                // Determine file size by probing best stream
+                val primaryStream = streamUrls.first().second
+                var contentBytes = probeContentLength(primaryStream)
+
+                val formats = mutableListOf<MediaFormat>()
+                streamUrls.forEachIndexed { index, (label, streamUrl) ->
+                    formats.add(
+                        MediaFormat(
+                            id = "fb_v_$index",
+                            formatLabel = label,
+                            mediaType = "VIDEO",
+                            downloadUrl = streamUrl,
+                            ext = "mp4",
+                            fileSizeBytes = contentBytes
+                        )
+                    )
+                }
+
+                // Audio extraction format (plays/saves stream as audio)
+                formats.add(
+                    MediaFormat(
+                        id = "fb_audio",
+                        formatLabel = "Audio Only (MP3)",
+                        mediaType = "AUDIO",
+                        downloadUrl = primaryStream,
+                        ext = "mp3",
+                        fileSizeBytes = if (contentBytes > 0) contentBytes / 3 else 0L,
+                        isAudioOnly = true
+                    )
+                )
+
+                return MediaExtractionResult(
+                    title = title,
+                    author = "Facebook",
+                    sourceUrl = url,
+                    thumbnailUrl = thumb,
+                    durationSeconds = 60L,
+                    platform = "Facebook",
+                    formats = formats
+                )
             }
-        } catch (_: Exception) {}
-
-        // Meta/Facebook bot protections: Provide accurate realistic sizes (~2.5 MB)
-        return MediaExtractionResult(
-            title = "Facebook Video ($videoId)",
-            author = "Facebook",
-            sourceUrl = url,
-            thumbnailUrl = null,
-            durationSeconds = 45L,
-            platform = "Facebook",
-            formats = listOf(
-                MediaFormat("fb_hd_stream", "HD Stream (720p MP4)", "VIDEO", FAST_MP4_STREAM, "mp4", 2_800_000L, "1280x720"),
-                MediaFormat("fb_sd_stream", "SD Stream (Mobile MP4)", "VIDEO", FAST_MP4_STREAM, "mp4", 1_800_000L, "640x360"),
-                MediaFormat("fb_audio_stream", "Extract Audio (MP3)", "AUDIO", FAST_MP3_STREAM, "mp3", 850_000L, isAudioOnly = true)
-            )
-        )
+        } catch (e: Exception) {
+            Log.w(TAG, "Facebook extraction error: ${e.message}")
+            return null
+        }
     }
 
-    private fun unescapeJsonUrl(escaped: String): String {
-        return escaped
-            .replace("\\/", "/")
-            .replace("\\u0026", "&")
-            .replace("&amp;", "&")
-    }
-
-    private suspend fun extractYouTube(url: String): MediaExtractionResult? {
+    /**
+     * Extracts YouTube streams using the InnerTube API (ANDROID_VR client) + oEmbed metadata.
+     * Returns authentic googlevideo.com stream URLs.
+     */
+    private fun extractYouTube(url: String): MediaExtractionResult? {
         val videoId = extractYouTubeVideoId(url) ?: return null
+
         var title = "YouTube Video ($videoId)"
         var author = "YouTube Creator"
         var thumb: String? = "https://i.ytimg.com/vi/$videoId/hqdefault.jpg"
 
-        // Fetch official authentic YouTube video metadata via oEmbed
+        // 1. Fetch official authentic video metadata via oEmbed
         try {
             val oembedUrl = "https://www.youtube.com/oembed?url=https://www.youtube.com/watch?v=$videoId&format=json"
             val request = Request.Builder()
                 .url(oembedUrl)
-                .header("User-Agent", USER_AGENT)
+                .header("User-Agent", USER_AGENT_MOBILE)
                 .build()
 
             client.newCall(request).execute().use { response ->
@@ -251,46 +297,154 @@ object MediaExtractorEngine {
             }
         } catch (_: Exception) {}
 
-        val formats = listOf(
-            MediaFormat("yt_720", "720p HD (Video + Audio)", "VIDEO", FAST_MP4_STREAM, "mp4", 5_500_000L, "1280x720"),
-            MediaFormat("yt_360", "360p Mobile Quality", "VIDEO", FAST_MP4_STREAM, "mp4", 2_500_000L, "640x360"),
-            MediaFormat("yt_audio_320", "320 kbps MP3 (HQ Audio)", "AUDIO", FAST_MP3_STREAM, "mp3", 800_000L, isAudioOnly = true),
-            MediaFormat("yt_audio_128", "128 kbps M4A", "AUDIO", FAST_MP3_STREAM, "m4a", 450_000L, isAudioOnly = true)
-        )
+        // 2. Fetch direct streams via InnerTube ANDROID_VR client
+        try {
+            val playerUrl = "https://www.youtube.com/youtubei/v1/player"
+            val jsonPayload = JSONObject().apply {
+                put("context", JSONObject().apply {
+                    put("client", JSONObject().apply {
+                        put("clientName", "ANDROID_VR")
+                        put("clientVersion", "1.61.48")
+                        put("deviceMake", "Oculus")
+                        put("deviceModel", "Quest 3")
+                        put("osName", "Android")
+                        put("osVersion", "12")
+                    })
+                })
+                put("videoId", videoId)
+            }
 
-        return MediaExtractionResult(
-            title = title,
-            author = author,
-            sourceUrl = url,
-            thumbnailUrl = thumb,
-            durationSeconds = 210L,
-            platform = "YouTube",
-            formats = formats,
-            subtitles = listOf(
-                SubtitleTrack("en", "English (Auto-generated)", "", "vtt")
-            )
-        )
+            val request = Request.Builder()
+                .url(playerUrl)
+                .header("Content-Type", "application/json")
+                .header("User-Agent", USER_AGENT_MOBILE)
+                .post(jsonPayload.toString().toRequestBody("application/json".toMediaType()))
+                .build()
+
+            client.newCall(request).execute().use { response ->
+                if (!response.isSuccessful) return null
+                val body = response.body?.string() ?: return null
+                val rootJson = JSONObject(body)
+
+                val playability = rootJson.optJSONObject("playabilityStatus")
+                val status = playability?.optString("status")
+                if (status != "OK") {
+                    Log.w(TAG, "YouTube playability status: $status")
+                    return null
+                }
+
+                val videoDetails = rootJson.optJSONObject("videoDetails")
+                if (videoDetails != null) {
+                    title = videoDetails.optString("title", title)
+                    author = videoDetails.optString("author", author)
+                }
+
+                val streamingData = rootJson.optJSONObject("streamingData") ?: return null
+                val formatsList = mutableListOf<MediaFormat>()
+
+                // Combined video + audio formats (plays everywhere seamlessly)
+                val combinedFormats = streamingData.optJSONArray("formats")
+                if (combinedFormats != null) {
+                    for (i in 0 until combinedFormats.length()) {
+                        val f = combinedFormats.getJSONObject(i)
+                        val streamUrl = f.optString("url")
+                        if (streamUrl.isNotBlank()) {
+                            val quality = f.optString("qualityLabel", "360p")
+                            val mime = f.optString("mimeType", "video/mp4")
+                            val ext = if (mime.contains("webm")) "webm" else "mp4"
+                            val contentLength = f.optLong("contentLength", 0L)
+                            formatsList.add(
+                                MediaFormat(
+                                    id = "yt_v_$i",
+                                    formatLabel = "$quality MP4 (Video + Audio)",
+                                    mediaType = "VIDEO",
+                                    downloadUrl = streamUrl,
+                                    ext = ext,
+                                    fileSizeBytes = contentLength,
+                                    resolution = quality
+                                )
+                            )
+                        }
+                    }
+                }
+
+                // Adaptive audio formats (M4A / Opus)
+                val adaptiveFormats = streamingData.optJSONArray("adaptiveFormats")
+                if (adaptiveFormats != null) {
+                    for (i in 0 until adaptiveFormats.length()) {
+                        val a = adaptiveFormats.getJSONObject(i)
+                        val streamUrl = a.optString("url")
+                        val mime = a.optString("mimeType", "")
+                        if (streamUrl.isNotBlank() && mime.contains("audio")) {
+                            val isM4a = mime.contains("audio/mp4")
+                            val ext = if (isM4a) "m4a" else "webm"
+                            val bitrate = a.optInt("bitrate", 128000) / 1000
+                            val contentLength = a.optLong("contentLength", 0L)
+                            val label = if (isM4a) "$bitrate kbps M4A Audio" else "$bitrate kbps Opus Audio"
+                            formatsList.add(
+                                MediaFormat(
+                                    id = "yt_a_$i",
+                                    formatLabel = label,
+                                    mediaType = "AUDIO",
+                                    downloadUrl = streamUrl,
+                                    ext = ext,
+                                    fileSizeBytes = contentLength,
+                                    bitrate = "$bitrate kbps",
+                                    isAudioOnly = true
+                                )
+                            )
+                        }
+                    }
+                }
+
+                if (formatsList.isNotEmpty()) {
+                    return MediaExtractionResult(
+                        title = title,
+                        author = author,
+                        sourceUrl = url,
+                        thumbnailUrl = thumb,
+                        durationSeconds = videoDetails?.optLong("lengthSeconds", 0L) ?: 0L,
+                        platform = "YouTube",
+                        formats = formatsList,
+                        subtitles = listOf(
+                            SubtitleTrack("en", "English", "", "vtt")
+                        )
+                    )
+                }
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "YouTube InnerTube extraction error: ${e.message}")
+        }
+        return null
     }
 
-    private suspend fun extractFromHtmlPage(url: String): MediaExtractionResult? {
+    /**
+     * Extracts direct HTML5 video from OpenGraph or video tag on web pages.
+     */
+    private fun extractFromHtmlPage(url: String): MediaExtractionResult? {
         try {
             val request = Request.Builder()
                 .url(url)
-                .header("User-Agent", USER_AGENT)
+                .header("User-Agent", USER_AGENT_MOBILE)
                 .build()
 
             client.newCall(request).execute().use { response ->
                 if (!response.isSuccessful) return null
                 val html = response.body?.string() ?: return null
 
-                // Extract OpenGraph Video
-                val ogVideoMatcher = Pattern.compile("<meta\\s+(?:property|name)=[\"']og:video(?::secure_url|:url)?[\"']\\s+content=[\"']([^\"']+)[\"']", Pattern.CASE_INSENSITIVE).matcher(html)
-                var videoUrl: String? = if (ogVideoMatcher.find()) ogVideoMatcher.group(1) else null
+                val ogVideoMatcher = Pattern.compile(
+                    "<meta\\s+(?:property|name)=[\"']og:video(?::secure_url|:url)?[\"']\\s+content=[\"']([^\"']+)[\"']",
+                    Pattern.CASE_INSENSITIVE
+                ).matcher(html)
+                var videoUrl: String? = if (ogVideoMatcher.find()) cleanUrl(ogVideoMatcher.group(1)) else null
 
                 if (videoUrl == null) {
-                    val videoTagMatcher = Pattern.compile("<(?:video|source)[^>]+src=[\"']([^\"']+\\.(?:mp4|webm|m3u8)[^\"']*)[\"']", Pattern.CASE_INSENSITIVE).matcher(html)
+                    val videoTagMatcher = Pattern.compile(
+                        "<(?:video|source)[^>]+src=[\"']([^\"']+\\.(?:mp4|webm|m3u8)[^\"']*)[\"']",
+                        Pattern.CASE_INSENSITIVE
+                    ).matcher(html)
                     if (videoTagMatcher.find()) {
-                        videoUrl = videoTagMatcher.group(1)
+                        videoUrl = cleanUrl(videoTagMatcher.group(1))
                     }
                 }
 
@@ -300,14 +454,22 @@ object MediaExtractorEngine {
                         videoUrl = "${baseUri.scheme}://${baseUri.host}$videoUrl"
                     }
 
-                    val titleMatcher = Pattern.compile("<meta\\s+(?:property|name)=[\"']og:title[\"']\\s+content=[\"']([^\"']+)[\"']", Pattern.CASE_INSENSITIVE).matcher(html)
-                    val title = if (titleMatcher.find()) titleMatcher.group(1) else {
+                    val titleMatcher = Pattern.compile(
+                        "<meta\\s+(?:property|name)=[\"']og:title[\"']\\s+content=[\"']([^\"']+)[\"']",
+                        Pattern.CASE_INSENSITIVE
+                    ).matcher(html)
+                    val title = if (titleMatcher.find()) cleanHtmlText(titleMatcher.group(1)) else {
                         val htmlTitleMatcher = Pattern.compile("<title>([^<]+)</title>", Pattern.CASE_INSENSITIVE).matcher(html)
-                        if (htmlTitleMatcher.find()) htmlTitleMatcher.group(1).trim() else "Web Video"
+                        if (htmlTitleMatcher.find()) cleanHtmlText(htmlTitleMatcher.group(1)) else "Web Video"
                     }
 
-                    val thumbMatcher = Pattern.compile("<meta\\s+(?:property|name)=[\"']og:image[\"']\\s+content=[\"']([^\"']+)[\"']", Pattern.CASE_INSENSITIVE).matcher(html)
-                    val thumb = if (thumbMatcher.find()) thumbMatcher.group(1) else null
+                    val thumbMatcher = Pattern.compile(
+                        "<meta\\s+(?:property|name)=[\"']og:image[\"']\\s+content=[\"']([^\"']+)[\"']",
+                        Pattern.CASE_INSENSITIVE
+                    ).matcher(html)
+                    val thumb = if (thumbMatcher.find()) cleanUrl(thumbMatcher.group(1)) else null
+
+                    val sizeBytes = probeContentLength(videoUrl)
 
                     return MediaExtractionResult(
                         title = title,
@@ -317,8 +479,8 @@ object MediaExtractorEngine {
                         durationSeconds = 120L,
                         platform = "Web HTML5 Video",
                         formats = listOf(
-                            MediaFormat("html5_hd", "Direct Video Stream (MP4)", "VIDEO", videoUrl, "mp4", 3_200_000L),
-                            MediaFormat("html5_audio", "Extracted Audio (MP3)", "AUDIO", videoUrl, "mp3", 950_000L, isAudioOnly = true)
+                            MediaFormat("html5_video", "Direct Video Stream (MP4)", "VIDEO", videoUrl, "mp4", sizeBytes),
+                            MediaFormat("html5_audio", "Extracted Audio (MP3)", "AUDIO", videoUrl, "mp3", sizeBytes / 3, isAudioOnly = true)
                         )
                     )
                 }
@@ -327,23 +489,29 @@ object MediaExtractorEngine {
         return null
     }
 
-    private fun createSmartFallback(url: String): MediaExtractionResult {
-        val uri = Uri.parse(url)
-        val host = uri.host ?: "Web Media"
-        val cleanName = uri.lastPathSegment?.substringBefore("?")?.takeIf { it.isNotBlank() } ?: "Media Stream"
+    private fun probeContentLength(url: String): Long {
+        return try {
+            val req = Request.Builder()
+                .url(url)
+                .head()
+                .header("User-Agent", USER_AGENT_MOBILE)
+                .build()
+            client.newCall(req).execute().use { resp ->
+                resp.header("Content-Length")?.toLongOrNull() ?: 0L
+            }
+        } catch (_: Exception) {
+            0L
+        }
+    }
 
-        return MediaExtractionResult(
-            title = cleanName.replace("_", " "),
-            author = host,
-            sourceUrl = url,
-            thumbnailUrl = null,
-            durationSeconds = 60L,
-            platform = "Universal Extractor",
-            formats = listOf(
-                MediaFormat("ext_hd", "HD Stream (MP4)", "VIDEO", FAST_MP4_STREAM, "mp4", 2_800_000L, "1280x720"),
-                MediaFormat("ext_sd", "SD Stream (Mobile)", "VIDEO", FAST_MP4_STREAM, "mp4", 1_800_000L, "640x360"),
-                MediaFormat("ext_audio", "Extracted Audio (MP3)", "AUDIO", FAST_MP3_STREAM, "mp3", 850_000L, isAudioOnly = true)
-            )
-        )
+    private fun cleanUrl(raw: String): String {
+        return raw.replace("\\/", "/")
+            .replace("\\u0026", "&")
+            .replace("&amp;", "&")
+            .trim()
+    }
+
+    private fun cleanHtmlText(raw: String): String {
+        return Html.fromHtml(raw, Html.FROM_HTML_MODE_LEGACY).toString().trim()
     }
 }

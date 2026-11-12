@@ -20,6 +20,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Audiotrack
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Lock
+import androidx.compose.material.icons.filled.Public
 import androidx.compose.material.icons.filled.Subtitles
 import androidx.compose.material.icons.filled.Videocam
 import androidx.compose.material3.Button
@@ -32,6 +33,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.RadioButton
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Tab
 import androidx.compose.material3.TabRow
@@ -129,44 +131,35 @@ fun FormatPickerSheet(
                 }
             }
 
-            if (extraction.platform == "Facebook" || extraction.sourceUrl.contains("facebook.com") || extraction.sourceUrl.contains("fb.watch")) {
+            if (onOpenInBrowser != null) {
                 Spacer(modifier = Modifier.height(10.dp))
-                Card(
+                Surface(
                     shape = RoundedCornerShape(12.dp),
-                    colors = CardDefaults.cardColors(containerColor = ElectricCyan.copy(alpha = 0.12f)),
-                    modifier = Modifier.fillMaxWidth()
+                    color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable {
+                            onDismiss()
+                            onOpenInBrowser(extraction.sourceUrl)
+                        }
                 ) {
                     Row(
-                        modifier = Modifier.padding(12.dp),
+                        modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text(
-                                text = "Facebook 2-3 MB Stream",
-                                style = MaterialTheme.typography.labelLarge,
-                                fontWeight = FontWeight.Bold,
-                                color = ElectricCyan
-                            )
-                            Text(
-                                text = "Download below (2-3 MB) or tap 'Browser' to detect the original clip inside TubeAIO.",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                        }
-                        if (onOpenInBrowser != null) {
-                            Spacer(modifier = Modifier.width(8.dp))
-                            androidx.compose.material3.Button(
-                                onClick = {
-                                    onDismiss()
-                                    onOpenInBrowser(extraction.sourceUrl)
-                                },
-                                colors = ButtonDefaults.buttonColors(containerColor = ElectricCyan),
-                                contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 10.dp, vertical = 4.dp),
-                                modifier = Modifier.height(34.dp)
-                            ) {
-                                Text("Browser", fontSize = 12.sp, fontWeight = FontWeight.Bold)
-                            }
-                        }
+                        Icon(
+                            Icons.Default.Public,
+                            contentDescription = null,
+                            tint = ElectricCyan,
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Spacer(modifier = Modifier.width(10.dp))
+                        Text(
+                            text = "Play or sniff directly in Built-in Browser →",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = ElectricCyan,
+                            fontWeight = FontWeight.SemiBold
+                        )
                     }
                 }
             }
@@ -262,9 +255,10 @@ fun FormatPickerSheet(
                                 )
                             }
                             if (format.fileSizeBytes > 0) {
-                                val mb = format.fileSizeBytes / (1024 * 1024)
+                                val mb = format.fileSizeBytes.toDouble() / (1024 * 1024)
+                                val sizeText = if (mb < 0.1) "< 0.1 MB" else String.format(java.util.Locale.US, "%.1f MB", mb)
                                 Text(
-                                    text = "~$mb MB",
+                                    text = "~$sizeText",
                                     style = MaterialTheme.typography.labelMedium,
                                     color = ElectricCyan,
                                     fontWeight = FontWeight.SemiBold

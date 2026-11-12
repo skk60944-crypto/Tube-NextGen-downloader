@@ -4,6 +4,7 @@ import android.content.Context
 import android.util.Log
 import com.example.data.AppDatabase
 import com.example.model.MediaEntity
+import com.example.util.StorageHelper
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -169,32 +170,42 @@ class DownloadEngine private constructor(private val context: Context) {
                     }
 
                     val inputStream = body.byteStream()
-                    val buffer = ByteArray(32 * 1024)
+                    val buffer = ByteArray(128 * 1024)
                     var totalDownloaded = existingBytes
-                    var lastUpdate = System.currentTimeMillis()
-                    var bytesSinceLastUpdate = 0L
+                    var lastUiUpdate = System.currentTimeMillis()
+                    var lastDbUpdate = System.currentTimeMillis()
+                    var bytesSinceLastUiUpdate = 0L
                     var currentSpeed = 0L
+                    var lastRecordedProgress = if (totalBytes > 0) ((totalDownloaded * 100) / totalBytes).toInt() else 0
 
                     outputStream.use { raf ->
                         var read = inputStream.read(buffer)
                         while (isActive && read != -1) {
                             raf.write(buffer, 0, read)
                             totalDownloaded += read
-                            bytesSinceLastUpdate += read
+                            bytesSinceLastUiUpdate += read
 
                             val now = System.currentTimeMillis()
-                            val timeDiff = now - lastUpdate
-                            if (timeDiff >= 400) {
-                                currentSpeed = (bytesSinceLastUpdate * 1000) / timeDiff.coerceAtLeast(1)
+                            val timeDiffUi = now - lastUiUpdate
+                            if (timeDiffUi >= 300) {
+                                currentSpeed = (bytesSinceLastUiUpdate * 1000) / timeDiffUi.coerceAtLeast(1)
                                 val progress = if (totalBytes > 0) {
                                     ((totalDownloaded * 100) / totalBytes).toInt().coerceIn(0, 100)
                                 } else 0
 
-                                mediaDao.updateProgress(id, progress, totalDownloaded, totalBytes, currentSpeed)
+                                // Update in-memory reactive state flow for fluid UI progress & speed
                                 updateStats(id, entity.title, progress, currentSpeed, totalDownloaded, totalBytes)
 
-                                lastUpdate = now
-                                bytesSinceLastUpdate = 0L
+                                // Decouple heavy SQLite disk writes: persist to Room every 2 seconds or on 5% jump
+                                val timeDiffDb = now - lastDbUpdate
+                                if (timeDiffDb >= 2000 || kotlin.math.abs(progress - lastRecordedProgress) >= 5) {
+                                    mediaDao.updateProgress(id, progress, totalDownloaded, totalBytes, currentSpeed)
+                                    lastDbUpdate = now
+                                    lastRecordedProgress = progress
+                                }
+
+                                lastUiUpdate = now
+                                bytesSinceLastUiUpdate = 0L
                             }
                             read = inputStream.read(buffer)
                         }
@@ -220,6 +231,12 @@ class DownloadEngine private constructor(private val context: Context) {
                             completedAt = System.currentTimeMillis()
                         )
                     )
+
+                    // Index completed download into Android Gallery & Photos app if not in private vault
+                    if (!entity.isVault) {
+                        StorageHelper.scanMediaFile(context, targetFile, entity.mediaType)
+                    }
+
                     removeStats(id)
                 }
             } catch (e: CancellationException) {

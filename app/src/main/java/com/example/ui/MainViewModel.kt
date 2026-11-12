@@ -21,6 +21,7 @@ import com.example.model.MediaExtractionResult
 import com.example.model.MediaFormat
 import com.example.service.AudioPlaybackService
 import com.example.service.DownloadEngine
+import com.example.util.StorageHelper
 import com.example.vault.VaultManager
 import com.google.common.util.concurrent.ListenableFuture
 import com.google.common.util.concurrent.MoreExecutors
@@ -213,7 +214,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             val targetDir = if (saveToVault) {
                 File(getApplication<Application>().filesDir, "vault_storage")
             } else {
-                File(getApplication<Application>().getExternalFilesDir(null) ?: getApplication<Application>().filesDir, "downloads")
+                StorageHelper.getPublicStorageDir(getApplication(), format.isAudioOnly)
             }
             targetDir.mkdirs()
 

@@ -73,6 +73,9 @@ class VaultManager(private val context: Context) {
             sourceFile.copyTo(targetFile, overwrite = true)
             sourceFile.delete()
 
+            // Notify media scanner to remove former public file from Gallery
+            com.example.util.StorageHelper.scanMediaFile(context, sourceFile, media.mediaType)
+
             val updated = media.copy(
                 filePath = targetFile.absolutePath,
                 isVault = true
@@ -91,16 +94,18 @@ class VaultManager(private val context: Context) {
                 return@withContext Result.failure(IllegalStateException("Vault file not found: ${media.filePath}"))
             }
 
-            // Target public downloads directory
-            val publicDir = File(context.getExternalFilesDir(null) ?: context.filesDir, "downloads").apply {
-                if (!exists()) mkdirs()
-            }
+            // Target public movies/music directory
+            val isAudio = media.mediaType == "AUDIO"
+            val publicDir = com.example.util.StorageHelper.getPublicStorageDir(context, isAudio)
             val safeTitle = media.title.replace(Regex("[^a-zA-Z0-9._-]"), "_").take(40)
-            val ext = if (media.mediaType == "AUDIO") "mp3" else "mp4"
+            val ext = if (isAudio) "mp3" else "mp4"
             val targetFile = File(publicDir, "${safeTitle}_${media.id.take(6)}.$ext")
 
             sourceFile.copyTo(targetFile, overwrite = true)
             sourceFile.delete()
+
+            // Index restored file into Android Gallery / Music Library
+            com.example.util.StorageHelper.scanMediaFile(context, targetFile, media.mediaType)
 
             val updated = media.copy(
                 filePath = targetFile.absolutePath,
